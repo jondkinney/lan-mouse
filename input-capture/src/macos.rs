@@ -357,11 +357,22 @@ fn get_events(
             })))
         }
         CGEventType::ScrollWheel => {
+            // CGEventTap at Session level (our placement) sees scroll
+            // deltas *after* macOS applies the Natural Scrolling
+            // preference sign flip. Sinks on the other end of the
+            // wire (wl_pointer / libei / evdev / Windows) all use a
+            // fixed-convention scroll signal that doesn't track this
+            // preference, so we have to invert here when Natural
+            // Scrolling is enabled — otherwise the gesture and the
+            // resulting scroll on the peer go in opposite directions.
+            // See the macos-cgevent-scroll-delta-natural-scroll-
+            // preference skill for a full writeup.
+            let sign: i64 = if natural_scrolling_enabled() { -1 } else { 1 };
             if ev.get_integer_value_field(EventField::SCROLL_WHEEL_EVENT_IS_CONTINUOUS) != 0 {
-                let v =
-                    ev.get_integer_value_field(EventField::SCROLL_WHEEL_EVENT_POINT_DELTA_AXIS_1);
-                let h =
-                    ev.get_integer_value_field(EventField::SCROLL_WHEEL_EVENT_POINT_DELTA_AXIS_2);
+                let v = sign
+                    * ev.get_integer_value_field(EventField::SCROLL_WHEEL_EVENT_POINT_DELTA_AXIS_1);
+                let h = sign
+                    * ev.get_integer_value_field(EventField::SCROLL_WHEEL_EVENT_POINT_DELTA_AXIS_2);
                 if v != 0 {
                     result.push(CaptureEvent::Input(Event::Pointer(PointerEvent::Axis {
                         time: 0,
@@ -380,8 +391,10 @@ fn get_events(
                 // line based scrolling
                 const LINES_PER_STEP: i32 = 3;
                 const V120_STEPS_PER_LINE: i32 = 120 / LINES_PER_STEP;
-                let v = ev.get_integer_value_field(EventField::SCROLL_WHEEL_EVENT_DELTA_AXIS_1);
-                let h = ev.get_integer_value_field(EventField::SCROLL_WHEEL_EVENT_DELTA_AXIS_2);
+                let v =
+                    sign * ev.get_integer_value_field(EventField::SCROLL_WHEEL_EVENT_DELTA_AXIS_1);
+                let h =
+                    sign * ev.get_integer_value_field(EventField::SCROLL_WHEEL_EVENT_DELTA_AXIS_2);
                 if v != 0 {
                     result.push(CaptureEvent::Input(Event::Pointer(
                         PointerEvent::AxisDiscrete120 {
@@ -839,6 +852,43 @@ extern "C" {
 #[link(name = "ApplicationServices", kind = "framework")]
 extern "C" {
     fn AXIsProcessTrusted() -> bool;
+}
+
+/// Read `com.apple.swipescrolldirection` from the global preferences
+/// domain. Returns `true` when Natural Scrolling is enabled (the
+/// modern macOS default) — the same default macOS uses if the key
+/// is unset. Used to decide whether to invert scroll deltas before
+/// forwarding them to a peer that has its own fixed convention.
+fn natural_scrolling_enabled() -> bool {
+    unsafe {
+        let key_cstr = CString::new("com.apple.swipescrolldirection").unwrap();
+        let key = CFStringCreateWithCString(
+            kCFAllocatorDefault,
+            key_cstr.as_ptr() as *const c_char,
+            kCFStringEncodingUTF8,
+        );
+        if key.is_null() {
+            return true;
+        }
+        let value = CFPreferencesCopyAppValue(key, kCFPreferencesAnyApplication);
+        CFRelease(key as *const c_void);
+        if value.is_null() {
+            // Key absent → modern macOS default is enabled.
+            return true;
+        }
+        // The preference is stored as a CFBoolean; kCFBooleanTrue
+        // and kCFBooleanFalse are singleton instances, so a pointer
+        // compare is correct and sufficient.
+        let is_true = (value as CFBooleanRef) == kCFBooleanTrue;
+        CFRelease(value);
+        is_true
+    }
+}
+
+#[link(name = "CoreFoundation", kind = "framework")]
+extern "C" {
+    fn CFPreferencesCopyAppValue(key: CFStringRef, application_id: CFStringRef) -> *const c_void;
+    static kCFPreferencesAnyApplication: CFStringRef;
 }
 
 unsafe fn configure_cf_settings() -> Result<(), MacosCaptureCreationError> {
