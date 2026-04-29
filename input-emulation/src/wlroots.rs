@@ -8,6 +8,7 @@ use std::io;
 use std::os::fd::{AsFd, OwnedFd};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
+use wayland_client::Proxy;
 use wayland_client::WEnum;
 use wayland_client::backend::WaylandError;
 
