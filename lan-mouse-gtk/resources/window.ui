@@ -2,12 +2,6 @@
 <interface>
   <requires lib="gtk" version="4.0"/>
   <requires lib="libadwaita" version="1.0"/>
-  <menu id="main-menu">
-    <item>
-      <attribute name="label" translatable="yes">_Close window</attribute>
-      <attribute name="action">window.close</attribute>
-    </item>
-  </menu>
   <template class="LanMouseWindow" parent="AdwApplicationWindow">
     <property name="default-width">600</property>
     <property name="default-height">1400</property>
@@ -18,12 +12,6 @@
         <property name="orientation">vertical</property>
         <child type="top">
           <object class="AdwHeaderBar">
-            <child type ="end">
-              <object class="GtkMenuButton">
-                <property name="icon-name">open-menu-symbolic</property>
-                <property name="menu-model">main-menu</property>
-              </object>
-            </child>
             <style>
               <class name="flat"/>
             </style>
@@ -332,6 +320,27 @@
                             <child type="suffix">
                               <object class="GtkSwitch" id="mdns_discovery_switch">
                                 <property name="valign">center</property>
+                              </object>
+                            </child>
+                          </object>
+                        </child>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="AdwPreferencesGroup">
+                        <property name="title" translatable="yes">Clipboard Privacy</property>
+                        <property name="description" translatable="yes">Apps in this list never share their clipboard with peers — useful for password managers and other tools whose clipboard you don't want syncing.</property>
+                        <child>
+                          <object class="AdwActionRow" id="clipboard_privacy_row">
+                            <property name="title" translatable="yes">Suppressed Apps</property>
+                            <property name="subtitle" translatable="yes">0 apps</property>
+                            <child type="suffix">
+                              <object class="GtkButton" id="clipboard_privacy_button">
+                                <property name="label" translatable="yes">Manage</property>
+                                <property name="valign">center</property>
+                                <style>
+                                  <class name="flat"/>
+                                </style>
                               </object>
                             </child>
                           </object>

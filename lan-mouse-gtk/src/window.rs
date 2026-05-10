@@ -16,8 +16,8 @@ use lan_mouse_ipc::{
 };
 
 use crate::{
-    authorization_window::AuthorizationWindow, fingerprint_window::FingerprintWindow,
-    key_object::KeyObject, key_row::KeyRow,
+    authorization_window::AuthorizationWindow, clipboard_privacy_window::ClipboardPrivacyWindow,
+    fingerprint_window::FingerprintWindow, key_object::KeyObject, key_row::KeyRow,
 };
 
 use super::{client_object::ClientObject, client_row::ClientRow};
@@ -140,6 +140,25 @@ impl Window {
                                         key_obj.get_fingerprint(),
                                         sensitivity,
                                     ));
+                                }
+                            }
+                        ),
+                    );
+                    row.connect_closure(
+                        "request-clipboard-receive-change",
+                        false,
+                        closure_local!(
+                            #[strong]
+                            window,
+                            move |row: KeyRow, clipboard_receive: bool| {
+                                if let Some(key_obj) = window.authorized_by_idx(row.index() as u32)
+                                {
+                                    window.request(
+                                        FrontendRequest::SetIncomingPeerClipboardReceive(
+                                            key_obj.get_fingerprint(),
+                                            clipboard_receive,
+                                        ),
+                                    );
                                 }
                             }
                         ),
@@ -272,6 +291,22 @@ impl Window {
                             }
                         ),
                     );
+                    row.connect_closure(
+                        "request-clipboard-send-change",
+                        false,
+                        closure_local!(
+                            #[strong]
+                            window,
+                            move |row: ClientRow, clipboard_send: bool| {
+                                if let Some(client) = window.client_by_idx(row.index() as u32) {
+                                    window.request(FrontendRequest::SetClientClipboardSend(
+                                        client.handle(),
+                                        clipboard_send,
+                                    ));
+                                }
+                            }
+                        ),
+                    );
                     row.upcast()
                 }
             ),
@@ -374,6 +409,7 @@ impl Window {
         row.set_hostname(client.hostname);
         row.set_port(client.port);
         row.set_position(client.pos);
+        row.set_clipboard_send(client.clipboard_send);
     }
 
     pub(super) fn update_client_state(&self, handle: ClientHandle, state: ClientState) {
@@ -454,6 +490,113 @@ impl Window {
 
     pub(super) fn request_mdns_discovery(&self, enabled: bool) {
         self.request(FrontendRequest::SetMdnsDiscovery(enabled));
+    }
+
+    /// Forward the daemon's running-apps snapshot to the modal (if
+    /// it's been created). No-op when the user hasn't opened the
+    /// privacy window yet, since the picker is built lazily.
+    pub(super) fn set_running_apps(&self, apps: Vec<lan_mouse_ipc::RunningApp>) {
+        if let Some(window) = self.imp().clipboard_privacy_window.borrow().as_ref() {
+            window.set_running_apps(apps);
+        }
+    }
+
+    /// Replace the cached suppression list (host-OS strings) and
+    /// update both the main-window subtitle and the modal (if
+    /// open).
+    pub(super) fn set_suppressed_apps(&self, apps: Vec<String>) {
+        let imp = self.imp();
+        imp.suppressed_apps.replace(apps.clone());
+        let count = apps.len();
+        let subtitle = match count {
+            0 => "0 apps".to_owned(),
+            1 => "1 app".to_owned(),
+            n => format!("{n} apps"),
+        };
+        imp.clipboard_privacy_row.set_subtitle(&subtitle);
+        if let Some(window) = imp.clipboard_privacy_window.borrow().as_ref() {
+            window.set_apps(apps);
+        }
+    }
+
+    /// Show (or re-present) the clipboard-privacy modal, populating
+    /// it with the current suppression list. The modal is created
+    /// on first open and reused thereafter so the user's in-progress
+    /// edits aren't blown away by the every-toggle
+    /// SuppressedAppsUpdated round-trip.
+    pub(super) fn open_clipboard_privacy_window(&self) {
+        let imp = self.imp();
+        if imp.clipboard_privacy_window.borrow().is_none() {
+            let window = ClipboardPrivacyWindow::new();
+            window.set_transient_for(Some(self));
+            // Match the parent-relative sizing the other dialogs use.
+            let parent_w = self.width();
+            if parent_w > 0 {
+                let popup_w = (parent_w - 40).clamp(280, 700);
+                window.set_default_width(popup_w);
+            }
+            window.connect_closure(
+                "request-add",
+                false,
+                closure_local!(
+                    #[strong(rename_to = parent)]
+                    self,
+                    move |_w: ClipboardPrivacyWindow, value: String| {
+                        parent.request(FrontendRequest::AddSuppressedApp(value));
+                    }
+                ),
+            );
+            window.connect_closure(
+                "request-remove",
+                false,
+                closure_local!(
+                    #[strong(rename_to = parent)]
+                    self,
+                    move |_w: ClipboardPrivacyWindow, value: String| {
+                        parent.request(FrontendRequest::RemoveSuppressedApp(value));
+                    }
+                ),
+            );
+            window.set_apps(imp.suppressed_apps.borrow().clone());
+            // The daemon (a forked LSUIElement child) can't see
+            // other apps via NSWorkspace / NSRunningApplication —
+            // those APIs are scoped to the caller's loginwindow
+            // session and the daemon doesn't fully inherit one.
+            // The GUI process IS Aqua-attached, so we enumerate
+            // here and skip the IPC roundtrip entirely.
+            window.set_running_apps(input_capture::frontmost_app::list_running_apps());
+            // Auto-refresh every 5s while the modal is visible so
+            // launches/quits surface eventually without thrashing
+            // the main thread (each refresh re-encodes ~30 PNG
+            // icons). Skip refresh while the picker's popover is
+            // open so the user's selection / search doesn't
+            // disappear mid-interaction. Timer self-detaches when
+            // the window is dropped.
+            let window_weak = window.downgrade();
+            glib::source::timeout_add_local(std::time::Duration::from_secs(5), move || {
+                let Some(window) = window_weak.upgrade() else {
+                    return glib::ControlFlow::Break;
+                };
+                if !window.is_visible() {
+                    return glib::ControlFlow::Continue;
+                }
+                if window.picker_is_open() {
+                    return glib::ControlFlow::Continue;
+                }
+                window.set_running_apps(input_capture::frontmost_app::list_running_apps());
+                glib::ControlFlow::Continue
+            });
+            imp.clipboard_privacy_window.replace(Some(window));
+        } else if let Some(window) = imp.clipboard_privacy_window.borrow().as_ref() {
+            // Refresh both the suppressed-apps list and the
+            // running-apps picker in case they changed while the
+            // modal was hidden.
+            window.set_apps(imp.suppressed_apps.borrow().clone());
+            window.set_running_apps(input_capture::frontmost_app::list_running_apps());
+        }
+        if let Some(window) = imp.clipboard_privacy_window.borrow().as_ref() {
+            window.present();
+        }
     }
 
     fn open_fingerprint_dialog(&self, fp: Option<String>) {
@@ -642,6 +785,7 @@ impl Window {
                 key_obj.set_mouse_sensitivity(peer.mouse_sensitivity);
                 key_obj.set_last_addr(peer.last_addr.unwrap_or_default());
                 key_obj.set_last_hostname(peer.last_hostname.unwrap_or_default());
+                key_obj.set_clipboard_receive(peer.clipboard_receive);
             } else {
                 authorized.remove(idx);
             }

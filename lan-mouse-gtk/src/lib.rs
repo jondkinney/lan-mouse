@@ -1,13 +1,18 @@
 mod authorization_window;
 mod client_object;
 mod client_row;
+mod clipboard_privacy_window;
 mod fingerprint_window;
 mod key_object;
 mod key_row;
+#[cfg(target_os = "linux")]
+mod linux_tray;
 #[cfg(target_os = "macos")]
 mod macos_privacy;
 #[cfg(target_os = "macos")]
 mod macos_status_item;
+mod modal_keys;
+mod running_app_object;
 mod window;
 
 use std::{env, process, str, sync::OnceLock};
@@ -221,6 +226,13 @@ fn setup_actions(app: &adw::Application) {
     // native Ctrl+W behavior on Linux/Windows.
     #[cfg(target_os = "macos")]
     app.set_accels_for_action("window.close", &["<Meta>w"]);
+
+    // Super+W → hide the window on Linux. The Linux close-request
+    // handler in `build_ui` intercepts the resulting close action and
+    // hides the window rather than destroying it; the tray's hold
+    // guard keeps the app alive in the background.
+    #[cfg(target_os = "linux")]
+    app.set_accels_for_action("window.close", &["<Super>w"]);
 }
 
 // Set up a global menu
@@ -263,6 +275,30 @@ fn build_ui(app: &Application) {
     });
 
     let window = Window::new(app, frontend_tx);
+    #[cfg(target_os = "linux")]
+    {
+        // Hide-on-close: the X button, GTK's `window.close` action
+        // (bound to Super+W above), and any WM-level close request
+        // (Hyprland's Super+W if mapped, an `hyprctl dispatch
+        // killactive`, etc.) all funnel through `close-request`.
+        // Returning `Stop` keeps the GtkWindow alive so the tray's
+        // "Open Lan Mouse" can re-present it without rebuilding state.
+        window.connect_close_request(|window| {
+            window.set_visible(false);
+            glib::Propagation::Stop
+        });
+        // Stash the hold guard for the lifetime of the process so the
+        // GtkApplication does not exit when the last visible window
+        // closes — the tray needs to outlive the GUI.
+        thread_local! {
+            static TRAY_HOLD: std::cell::OnceCell<gio::ApplicationHoldGuard> =
+                const { std::cell::OnceCell::new() };
+        }
+        let hold = linux_tray::setup(app, &window);
+        TRAY_HOLD.with(|cell| {
+            let _ = cell.set(hold);
+        });
+    }
     #[cfg(target_os = "macos")]
     {
         window.connect_close_request(|window| {
@@ -359,6 +395,12 @@ fn build_ui(app: &Application) {
                     }
                     FrontendEvent::MdnsDiscovery(enabled) => {
                         window.set_mdns_discovery(enabled);
+                    }
+                    FrontendEvent::SuppressedAppsUpdated(apps) => {
+                        window.set_suppressed_apps(apps);
+                    }
+                    FrontendEvent::RunningApps(apps) => {
+                        window.set_running_apps(apps);
                     }
                 }
             }

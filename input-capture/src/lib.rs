@@ -17,7 +17,11 @@ use input_event::{Event, KeyboardEvent, PointerEvent, scancode};
 
 pub use error::{CaptureCreationError, CaptureError, InputCaptureError};
 
+pub mod clipboard;
+#[cfg(all(unix, not(target_os = "macos")))]
+pub mod desktop_entries;
 pub mod error;
+pub mod frontmost_app;
 
 #[cfg(all(unix, feature = "libei", not(target_os = "macos")))]
 mod libei;
@@ -39,7 +43,7 @@ mod dummy;
 
 pub type CaptureHandle = u64;
 
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum CaptureEvent {
     /// Capture on this handle is now active. `cursor`, when present,
     /// is the host's screen-space cursor position (in pixels) at the
@@ -822,8 +826,9 @@ impl Stream for InputCapture {
         };
 
         // handle key presses
-        if let CaptureEvent::Input(Event::Keyboard(KeyboardEvent::Key { key, state, .. })) = event {
-            self.update_pressed_keys(key, state);
+        if let CaptureEvent::Input(Event::Keyboard(KeyboardEvent::Key { key, state, .. })) = &event
+        {
+            self.update_pressed_keys(*key, *state);
         }
 
         // wall-press auto-release tracking. Runs against every event
@@ -850,7 +855,7 @@ impl Stream for InputCapture {
                 swap(&mut self.position_map, &mut position_map);
                 {
                     for &id in position_map.get(&pos).expect("position") {
-                        self.pending.push_back((id, event));
+                        self.pending.push_back((id, event.clone()));
                     }
                 }
                 swap(&mut self.position_map, &mut position_map);
